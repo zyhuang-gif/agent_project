@@ -20,10 +20,10 @@
 
 **非目标**：
 
-- 不做 per-user OAuth（原型阶段全项目共用一套系统身份）；
-- 不做客户端级幂等 / 去重；
+- 不做 per-user OAuth：P0 不让每个登录用户分别绑定自己的 Gmail / 飞书账号，统一使用一套系统发件身份（沙箱 Gmail / 公司机器人）；
+- 不做完整客户端级幂等 / 去重：P0 不新增 `send_request` 去重表；发送动作靠 preflight、单次 tool 调用约束和审计日志降低重复风险；
 - 不接入短信、微信、Slack、Teams（YAGNI）；
-- P0 不做附件文件生成 / 附件发送，只把 `final_answer` 作为正文发送；
+- P0 不做附件文件生成 / 附件发送；`final_answer` 只作为发送内容来源，由 `send` 节点生成专用 `send_payload`（subject + body）后发送；
 - 不做"读邮箱 / 删邮件 / 管理标签或过滤器"等敏感能力，Gmail MCP server 从实现上就不暴露这些工具。
 
 ## 2. 术语与选型澄清
@@ -51,9 +51,15 @@
 - **graph 引擎（`agent/graph/`）**：DAG 编排（Coordinator → Knowledge → Task/Gap → Finalize），节点内**不调 tool**——现有"任务工具"（compare / report / form）是节点内拼提示，不是 LLM tool_calls。
 - **本 P0 的取舍**：**只在 graph 引擎里承载发送能力**（见 § 3）。loop 引擎不注入 MCP 工具；P0 实现时把 `AGENT_ENGINE` 默认值切到 `graph`，loop 收敛/移除另起 spec（避免双引擎双向适配的额外成本）。
 
+### 2.4 P0 发送载荷与安全取舍
+
+- **系统发件身份**：P0 使用统一 Gmail 沙箱账号发出邮件，审计中记录触发发送的 `user_id/session_id`。这不是最终权限模型；正式多人使用前需要 per-user OAuth 或明确的组织级机器人发件策略。
+- **轻量防重复**：P0 不建幂等表，但必须保证一次 `send_node` 只调用一次 `gmail_send_email`，并把每次成功写入 `sends.log`。如果后续出现前端重试、后端超时重跑、批量发送等场景，再引入 `send_request_id` + `send_audit` 表做强幂等。
+- **专用发送载荷**：P0 无附件，但不能裸发 `final_answer`。`final_answer` 只是内容来源，`send` 节点必须生成 `send_payload`：`subject`、`body_text`（或 `body_markdown`）、`source_answer_preview`、`attachments=[]`。Gmail 工具只接收 `send_payload` 中的 subject/body。
+
 ## 3. 总体架构
 
-**P0 只走 graph 引擎，只支持 Gmail 正文发送**——在图上加一个 `send` 节点作为发送能力承载点。`send` 节点先做确定性 preflight（联系人解析、通道可用性、是否需要确认），只有在收件人单一明确且通道可用时，才把已解析好的收件人交给局部 `create_react_agent` 调用 MCP 发送工具。
+**P0 只走 graph 引擎，只支持 Gmail 正文发送**——在图上加一个 `send` 节点作为发送能力承载点。`send` 节点先做确定性 preflight（联系人解析、通道可用性、是否需要确认），再基于 `final_answer` 生成专用 `send_payload`（subject + body），最后才把已解析好的收件人和 payload 交给局部 `create_react_agent` 调用 MCP 发送工具。
 
 ```text
 ┌────────────────────────────────────────────────────────────────┐
@@ -69,9 +75,10 @@
 │                          │                       │             │
 │                          │  1. deterministic     │             │
 │                          │     preflight         │             │
-│                          │  2. create_react_agent│             │
+│                          │  2. build send_payload│             │
+│                          │  3. create_react_agent│             │
 │                          │     with send tools   │             │
-│                          │  3. send_report       │             │
+│                          │  4. send_report       │             │
 │                          └───────────────────────┘             │
 │                                    │                           │
 │                                    ▼                           │
@@ -101,7 +108,7 @@
 
 1. **P0 只支持 graph 引擎**——避免为 loop 侧多写一层 OpenAI schema ↔ BaseTool 双向适配；P0 实现时把 `agent.py` 的 `AGENT_ENGINE` 默认值从 `loop` 改为 `graph`，同时保留显式 `AGENT_ENGINE=loop` 的回退开关。
 2. **Gmail P0 自建最小 MCP server**——只暴露 `send_email`；不采用 `@gongrzhe/server-gmail-autoauth-mcp` 作为主链路，因为该社区仓库已归档，且工具面过宽（读信、删信、标签等能力不适合靠白名单事后剔除）。
-3. **`send` 节点 = DAG 节点 + 局部 ReAct**——主图仍由路由决定是否发送；节点内部只把已解析、已允许的收件人交给局部 `create_react_agent` 生成 subject/body 并调用发送工具。
+3. **`send` 节点 = DAG 节点 + 局部 ReAct**——主图仍由路由决定是否发送；节点内部先生成专用 `send_payload`，再把已解析、已允许的收件人和 payload 交给局部 `create_react_agent` 调用发送工具。
 4. **preflight 必须确定性执行**——联系人解析、通道可用性、是否需要用户确认都在 backend 代码里判断，不交给 LLM 自行决定。模糊命中、多命中、群聊/飞书在 P0 中一律不发送，返回需要确认或暂不支持。
 5. **send_guard 用 `ToolCallInterceptor` 实现**——挂在 `langchain-mcp-adapters` 的 `tool_interceptors` 上，负责白名单校验、审计日志和结构化错误；不再手写包一层 `BaseTool wrapper`。
 6. **开启 `tool_name_prefix=true`**——MCP 工具进入 LangChain 后统一叫 `gmail_send_email`、`contacts_resolve`、`feishu_send_message_to_group`，避免多 server 工具重名，也避免 OpenAI function name 对 `.` 的兼容风险。
@@ -135,6 +142,7 @@
 from langgraph.prebuilt import create_react_agent
 
 from app.mcp.client import mcp_manager
+from app.mcp.payload import build_send_payload
 from app.mcp.preflight import resolve_send_targets
 from app.utils.factory import get_chat_model
 
@@ -155,15 +163,22 @@ async def send_node(state: AgentState) -> dict:
             "trace": [{"agent": "send", "status": "skipped", "output": preflight.reason}],
         }
 
+    payload = await build_send_payload(
+        source_answer=state.get("final_answer") or "",
+        original_query=state.get("query") or "",
+        recipients=preflight.recipients,
+    )
+
     # P0 只给局部 agent 暴露 Gmail 发送工具，不暴露 contacts/feishu。
     tools = mcp_manager.get_tools(names=["gmail_send_email"])
     agent = create_react_agent(model=get_chat_model("send"), tools=tools)
 
     task = (
-        "把以下内容通过 Gmail 正文发送给已解析的收件人。"
-        "不要添加附件，不要改写收件人，不要调用未提供的工具。\n"
+        "使用下面的 send_payload 发送 Gmail。"
+        "不要添加附件，不要改写收件人，不要重新生成正文，不要调用未提供的工具。\n"
         f"收件人邮箱：{preflight.gmail_to}\n"
-        f"正文：{state.get('final_answer') or ''}"
+        f"subject：{payload.subject}\n"
+        f"body：{payload.body_text}"
     )
     result = await agent.ainvoke({"messages": [{"role": "user", "content": task}]})
     report = result["messages"][-1].content
@@ -199,6 +214,7 @@ backend/
 │   │   ├── client.py                    ← MCPClientManager，全局单例
 │   │   ├── config_loader.py             ← 读 mcp_servers.yaml
 │   │   ├── preflight.py                 ← 确定性解析/确认/通道可用性判断
+│   │   ├── payload.py                   ← final_answer → send_payload
 │   │   └── send_guard.py                ← ToolCallInterceptor：白名单 + 审计 + typed error
 │   ├── config/
 │   │   └── mcp_servers.yaml             ← 新
@@ -208,7 +224,7 @@ backend/
 │   │   └── graph/
 │   │       ├── build.py                 ← 改：路由加 send 节点
 │   │       ├── runner.py                ← 改：收集/输出/持久化 send_report
-│   │       ├── state.py                 ← 改：AgentState 加 send_report
+│   │       ├── state.py                 ← 改：AgentState 加 send_payload / send_report
 │   │       └── nodes/
 │   │           ├── coordinator.py       ← 改：CoordinatorPlan 扩 send 字段
 │   │           └── send.py              ← 新：preflight + create_react_agent + MCP tools
@@ -420,10 +436,11 @@ servers:
 4. preflight: contact_service.resolve("张三") → 单个 person + exact/alias + email
 5. preflight: P0 默认 channel=gmail，允许发送
 6. 局部 create_react_agent 只看到 gmail_send_email
-7. tool_call: gmail_send_email(to=[email], subject=..., body=final_answer)
-8. send_guard interceptor 白名单校验 + 成功审计
-9. send_report: "已通过 Gmail 发送给张三。"
-10. GraphRunner 把 send_report 追加给前端并持久化
+7. build_send_payload(final_answer) → {subject, body_text, attachments=[]}
+8. tool_call: gmail_send_email(to=[email], subject=payload.subject, body=payload.body_text)
+9. send_guard interceptor 白名单校验 + 成功审计
+10. send_report: "已通过 Gmail 发送给张三。"
+11. GraphRunner 把 send_report 追加给前端并持久化
 ```
 
 > 用户："把这份报告发给张三和运营组。"
@@ -433,13 +450,13 @@ P0 不做部分发送。因为包含 group/飞书通道，preflight 返回"飞�
 ## 6. 数据流 & 关键决定
 
 1. **发送触发由主图路由决定**：Coordinator 判 `send_intent`，路由 `finalize →(send_intent?)→ send | END`。LLM 不决定是否进入发送节点。
-2. **发送许可由 preflight 决定**：收件人解析、通道可用性、是否需要确认都在 backend 确定性执行。LLM 只处理 subject/body 组织与工具调用。
-3. **P0 无附件**：`report_tool` / `form_tool` 当前只是 prompt builder，真正输出在 `finalize_node`。因此 P0 只发送正文；artifact 生成、文件落盘、文件大小/路径安全校验、附件发送统一放 P1。
+2. **发送许可由 preflight 决定**：收件人解析、通道可用性、是否需要确认都在 backend 确定性执行。LLM 不决定是否允许发送。
+3. **P0 无附件，但有 `send_payload`**：`report_tool` / `form_tool` 当前只是 prompt builder，真正输出在 `finalize_node`。因此 P0 不发附件，也不裸发 `final_answer`；必须先生成专用 `send_payload`，再发送 subject/body。artifact 生成、文件落盘、文件大小/路径安全校验、附件发送统一放 P1。
 4. **工具白名单 + 工具名前缀**：MCPClientManager 开启 `tool_name_prefix=true`，再应用 `include_tools`；局部 send agent P0 只拿到 `gmail_send_email`。
 5. **审计日志**：`log/sends.log`（JSONL），每次成功发送写一行 `{ts, user_id, session_id, channel, recipient, subject_or_preview, message_id}`。写入点是 `send_guard` interceptor 的成功分支。
 6. **收件人白名单护栏**：LLM 只能发到 `contact.email` / P2 `contact.feishu_open_id` / P2 `feishu_group.chat_id` 里已录入且 active 的地址。白名单在 interceptor 层强制校验。
 7. **发送结果可见且可回放**：`send_report` 既追加到当前 SSE 输出，也进入 assistant message metadata。
-8. **幂等 / 重试**：P0 不做客户端级去重；Gmail API 失败不自动重试，由 send_report 明确告知失败。P1/P2 如要重试，需先引入 send_request_id 和去重表。
+8. **幂等 / 重试**：P0 不做完整客户端级去重表；但 `send_node` 必须保证一次请求最多一次真实 `gmail_send_email` 调用，且成功后写审计。Gmail API 失败不自动重试，由 send_report 明确告知失败。P1/P2 如要支持重试，需先引入 `send_request_id` 和去重表。
 9. **send 节点串行 tool 调用**：P0 只有 Gmail 单工具；P2 多通道也保持串行，错误恢复更清楚。
 
 ## 7. 错误处理
@@ -471,7 +488,8 @@ P0 不做部分发送。因为包含 group/飞书通道，preflight 返回"飞�
 - `test_mcp_client_boot.py` —— 启动能拿 prefixed 工具列表 / include_tools 生效 / 关闭清理 / env 缺失报错。
 - `test_send_guard.py` —— 白名单放行 / 拦截 / 大小写与 trim / 成功审计。
 - `test_send_preflight.py` —— exact 可发、fuzzy 需确认、group P0 不发、混合 unsupported 不做部分发送。
-- `test_send_node.py` —— mock preflight + mock tool，验证 send_report 与 trace。
+- `test_send_payload.py` —— 验证 final_answer 到 subject/body 的转换，不裸发原始 final_answer。
+- `test_send_node.py` —— mock preflight + mock payload + mock tool，验证 send_report 与 trace。
 - `test_graph_runner_send_report.py` —— 验证 send_report 进入 SSE token、done frame、session metadata。
 - `test_graph_coordinator_node.py` / routing tests —— 覆盖 `send_intent / recipients / channels` schema。
 
@@ -537,13 +555,13 @@ P0 不做部分发送。因为包含 group/飞书通道，preflight 返回"飞�
 7. `send_preflight`：确定性联系人解析、通道判断、禁止 P0 部分发送。
 8. Coordinator schema/prompt/fallback 扩 `send_intent / recipients / channels`。
 9. `build.py` 加 `send` 节点和 `finalize → send | END` 路由。
-10. `nodes/send.py`：preflight + 局部 `create_react_agent` + `gmail_send_email`。
+10. `nodes/send.py`：preflight + `send_payload` + 局部 `create_react_agent` + `gmail_send_email`。
 11. `GraphRunner` / `DatabaseSessionManager` 支持 `send_report` 可见与回放。
 12. `agent.py` 默认 `AGENT_ENGINE=graph`，`.env.example` 明写。
-13. 单测：client boot、gmail server、contacts、send_guard、preflight、send_node、GraphRunner send_report、Coordinator routing。
+13. 单测：client boot、gmail server、contacts、send_guard、preflight、send_payload、send_node、GraphRunner send_report、Coordinator routing。
 14. 手工 smoke：真实 Gmail 沙箱账号文本发送。
 
-**P0 验收**：`AGENT_ENGINE=graph` 下，对话说"把刚才那份报告发给 <已录入联系人>"，Agent 走完 graph 后经 send 节点，用 `gmail_send_email` 发送 `final_answer` 正文；邮件到达；前端看到"发送结果"；刷新会话仍能看到发送结果；`sends.log` 有一条记录。
+**P0 验收**：`AGENT_ENGINE=graph` 下，对话说"把刚才那份报告发给 <已录入联系人>"，Agent 走完 graph 后经 send 节点生成 `send_payload`，再用 `gmail_send_email` 发送 payload 的 subject/body；邮件到达且正文不是未清洗的原始 `final_answer`；前端看到"发送结果"；刷新会话仍能看到发送结果；`sends.log` 有一条记录。
 
 **P1 —— Artifact 与附件发送**
 
@@ -605,3 +623,7 @@ P0 不做部分发送。因为包含 group/飞书通道，preflight 返回"飞�
   - `send_guard wrapper` 改为 `ToolCallInterceptor`，并要求 `tool_name_prefix=true`；
   - 明确 `send_report` 必须进入 SSE、done frame 和 session metadata；
   - 明确 P0 实现时 `AGENT_ENGINE` 默认切到 `graph`。
+- **2026-07-03 三次修订**：
+  - 补充 per-user OAuth 与客户端级幂等/去重的含义和 P0 风险边界；
+  - 明确 P0 不裸发 `final_answer`，而是由 `send` 节点生成 `send_payload` 后发送；
+  - 增加 `payload.py` / `test_send_payload.py`，并把 P0 验收改为校验 subject/body payload。
