@@ -93,3 +93,30 @@ async def test_coordinator_uses_recent_history(monkeypatch):
     await coordinator_node(state)
     user_content = captured["messages"][-1]["content"]
     assert "差旅报销上限" in user_content and "那它呢" in user_content
+
+
+def test_plan_to_dict_normalizes_send_fields():
+    plan = _plan_to_dict(CoordinatorPlan(
+        task_type="report_generation",
+        need_retrieval=True,
+        reason="生成并发送报告",
+        send_intent=True,
+        recipients=["张三", "运营组"],
+        channels=["gmail", "feishu"],
+    ))
+
+    assert plan["send_intent"] is True
+    assert plan["recipients"] == ["张三", "运营组"]
+    assert plan["channels"] == ["gmail", "feishu"]
+
+
+def test_plan_to_dict_defaults_send_fields():
+    plan = _plan_to_dict(CoordinatorPlan(
+        task_type="knowledge_qa",
+        need_retrieval=True,
+        reason="普通问答",
+    ))
+
+    assert plan["send_intent"] is False
+    assert plan["recipients"] == []
+    assert plan["channels"] == []

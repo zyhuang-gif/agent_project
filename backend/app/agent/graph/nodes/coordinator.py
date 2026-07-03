@@ -15,10 +15,10 @@ _TASK_TYPES = {
     "report_generation", "knowledge_gap", "unknown",
 }
 
-_COORDINATOR_PROMPT = """你是企业知识库 Agent 的任务协调器。判断用户问题属于哪种任务类型，以及是否需要检索知识库。
+_COORDINATOR_PROMPT = """你是企业知识库 Agent 的任务协调器。判断用户问题属于哪种任务类型，是否需要检索知识库，以及是否要把结果发送出去。
 
 只输出一个 JSON 对象，不要任何额外解释，格式：
-{"task_type": "<类型>", "need_retrieval": <true|false>, "reason": "<简短中文理由>"}
+{"task_type": "<类型>", "need_retrieval": <true|false>, "reason": "<简短中文理由>", "send_intent": <true|false>, "recipients": ["<联系人>"], "channels": ["gmail|feishu"]}
 
 task_type 取值：
 - knowledge_qa：普通知识问答
@@ -28,11 +28,20 @@ task_type 取值：
 - knowledge_gap：明显超出知识库范围、需记录缺口
 - unknown：无法识别
 
-need_retrieval：除非是与企业知识完全无关的闲聊，否则一律为 true。"""
+need_retrieval：除非是与企业知识完全无关的闲聊，否则一律为 true。
+send_intent：用户明确说"发给 / 转给 / 抄送 / 通知 / 发到群"时为 true；只是生成报告或回答问题时为 false。
+recipients：只抽取用户明确说出的自然语言收件人，如"张三""运营组"；没有则为空数组。
+channels：用户明确指定邮件/Gmail 时写 "gmail"，明确指定飞书/群时写 "feishu"；未指定渠道时为空数组，由后端 P0 默认 Gmail。"""
 
-# 兜底 plan：分类失败时保守走检索（行为退化为 Phase 2）
-_FALLBACK_PLAN = {"task_type": "knowledge_qa", "need_retrieval": True,
-                  "reason": "分类失败，默认走检索"}
+# 兜底 plan：分类失败时保守走检索且不发送
+_FALLBACK_PLAN = {
+    "task_type": "knowledge_qa",
+    "need_retrieval": True,
+    "reason": "分类失败，默认走检索",
+    "send_intent": False,
+    "recipients": [],
+    "channels": [],
+}
 
 
 class CoordinatorPlan(BaseModel):
@@ -42,6 +51,9 @@ class CoordinatorPlan(BaseModel):
     ]
     need_retrieval: bool
     reason: str
+    send_intent: bool = False
+    recipients: list[str] = []
+    channels: list[str] = []
 
 
 def _plan_to_dict(plan_obj: CoordinatorPlan | dict) -> dict:
@@ -50,10 +62,16 @@ def _plan_to_dict(plan_obj: CoordinatorPlan | dict) -> dict:
     task_type = data.get("task_type")
     if task_type not in _TASK_TYPES:
         task_type = "unknown"
+    channels = [str(c).strip().lower() for c in data.get("channels", []) if str(c).strip()]
+    channels = [c for c in channels if c in ("gmail", "feishu")]
+    recipients = [str(r).strip() for r in data.get("recipients", []) if str(r).strip()]
     return {
         "task_type": task_type,
         "need_retrieval": bool(data.get("need_retrieval", True)),
         "reason": str(data.get("reason", "")),
+        "send_intent": bool(data.get("send_intent", False)),
+        "recipients": recipients,
+        "channels": channels,
     }
 
 
