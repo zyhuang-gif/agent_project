@@ -91,6 +91,7 @@ def _decode_sse_events(chunks):
 
 @pytest.mark.asyncio
 async def test_agent_stream_response_sends_tool_steps_to_frontend(monkeypatch):
+    monkeypatch.setenv("AGENT_ENGINE", "loop")
     monkeypatch.setattr(
         db_session_manager,
         "database_session_manager",
@@ -123,6 +124,7 @@ async def test_agent_stream_response_sends_tool_steps_to_frontend(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_agent_stream_response_sends_plan_and_status_updates(monkeypatch):
+    monkeypatch.setenv("AGENT_ENGINE", "loop")
     monkeypatch.setattr(
         db_session_manager,
         "database_session_manager",
@@ -178,6 +180,7 @@ async def test_agent_stream_response_sends_plan_and_status_updates(monkeypatch):
 @pytest.mark.asyncio
 async def test_agent_stream_response_persists_steps_and_citations(monkeypatch):
     """流结束时,累积后的 step 最终态(按 id 合并)与 citations 应一并传给 add_message。"""
+    monkeypatch.setenv("AGENT_ENGINE", "loop")
     fake_sm = _FakeSessionManager()
     monkeypatch.setattr(db_session_manager, "database_session_manager", fake_sm)
     monkeypatch.setattr(agent.agent_loop, "stream", _fake_agent_stream)
