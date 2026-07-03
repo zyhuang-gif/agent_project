@@ -7,6 +7,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.db.db_config import init_db
 from app.db.redis_config import connect_redis, close_redis
+from app.mcp.client import mcp_manager
 from app.router.chat import chat_router
 from app.router.contacts import contacts_router
 from app.router.health import health_router
@@ -81,15 +82,19 @@ async def startup_event():
     # 初始化数据库表结构
     await init_db()
     logger.info("数据库表结构初始化完成")
-    
+
     # 使用数据库版本的会话管理器
     await init_database_session_manager()
     logger.info("数据库会话管理器初始化完成")
 
+    # 初始化 MCP 客户端（读 yaml、拉工具、注册 send_guard）
+    await mcp_manager.start()
+    logger.info("MCP 工具管理器初始化完成")
+
     # 连接Redis
     await connect_redis()
     logger.info("Redis连接初始化完成")
-    
+
     # 检查并重排序模型
     check_and_download_reranker_model()
     logger.info("重排序模型检查完成")
@@ -101,5 +106,7 @@ async def startup_event():
 async def shutdown_event():
     """应用关闭时关闭Redis连接"""
     stop_scheduler()
+    await mcp_manager.shutdown()
+    logger.info("MCP 工具管理器已关闭")
     await close_redis()
     logger.info("Redis连接已关闭")

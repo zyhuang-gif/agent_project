@@ -445,7 +445,7 @@ async def get_agent_stream_response(
     # 以便流结束后随 assistant 消息一起落库,前端切回会话能还原
     agent_steps_state: dict[str, dict] = {}
 
-    engine = os.getenv("AGENT_ENGINE", "loop").strip().lower()
+    engine = os.getenv("AGENT_ENGINE", "graph").strip().lower()
     if engine == "graph":
         event_source = graph_runner.stream(query, history, identity=identity, session_id=session_id)
     else:

@@ -4,7 +4,7 @@
 
 当前项目更像一个完整的“知识库 + AI 问答”应用，而不是单纯的 LangChain demo：用户可以登录后创建或访问知识库，上传文档，在 AI 问答页基于个人或共享知识进行追问，并在会话页管理历史对话。
 
-后端 Agent 默认走传统 loop 引擎；通过 `AGENT_ENGINE=graph` 可切换到 **LangGraph 多节点图引擎**：Coordinator 自动识别任务类型 → Knowledge 检索 → 在 Task（对比 / 报告 / 申请）和 KnowledgeGap（知识缺口记录）之间分流 → Finalize 输出，所有步骤都会以"识别任务类型 / 生成对比 / 记录知识缺口"等提示流式回传给前端。
+后端 Agent 默认走 **LangGraph 多节点图引擎**：Coordinator 自动识别任务类型（含发送意图） → Knowledge 检索 → 在 Task（对比 / 报告 / 申请）和 KnowledgeGap（知识缺口记录）之间分流 → Finalize 输出，需要发送时再走 Send 节点通过 Gmail MCP 工具发出，所有步骤都会以"识别任务类型 / 生成对比 / 记录知识缺口 / 准备发送"等提示流式回传给前端。设置 `AGENT_ENGINE=loop` 可回退到传统单轮 loop 引擎，但 loop 侧不启用 MCP 发送能力。
 
 ## 目录
 
@@ -265,8 +265,15 @@ DJANGO_API_URL=http://127.0.0.1:8001
 RERANKER_TYPE=LOCAL
 RERANKER_MODEL_PATH=D:\Hugging_Face\models\Qwen3-Reranker-0.6B
 
-# Agent 引擎：loop（默认，传统单轮）或 graph（LangGraph 多节点）
-AGENT_ENGINE=loop
+# Agent 引擎：graph（默认，LangGraph 多节点）或 loop（传统单轮，不启用 MCP 发送）
+AGENT_ENGINE=graph
+
+# ── MCP 消息发送（P0）──────────────────────────
+# 总开关；本地准备好 Gmail OAuth 后再打开
+MCP_ENABLED=false
+GMAIL_CREDENTIALS_PATH=./secrets/gmail_credentials.json
+GMAIL_TOKEN_PATH=./secrets/gmail_token.json
+GMAIL_SENDER_EMAIL=your-sandbox@gmail.com
 
 # JWT：必须和 DjangoUserService/.env 的 JWT_SECRET_KEY 一致
 SECRET_KEY=change_me
@@ -301,7 +308,36 @@ REDIS_CACHE_URL=redis://127.0.0.1:6379/1
 - `SECRET_KEY` 和 `JWT_SECRET_KEY` 必须保持一致，否则 FastAPI 无法校验 Django 签发的 JWT。
 - Windows 本地建议把 `localhost` 写成 `127.0.0.1`，避免 IPv6 回退导致接口或数据库请求变慢。
 - 使用 Milvus 时先启动 `docker-compose.milvus.yml`，并把 `VECTOR_STORE_BACKEND=milvus`。
-- `AGENT_ENGINE` 默认 `loop`（传统单轮 Agent）；切到 `graph` 启用 LangGraph 多节点引擎，会经过 Coordinator → Knowledge → Task / KnowledgeGap → Finalize 节点，前端会看到「识别任务类型 / 生成对比 / 记录知识缺口」等步骤提示。
+- `AGENT_ENGINE` 默认 `graph`（LangGraph 多节点，含发送能力）；`loop` 走传统单轮 Agent，但不启用 MCP 发送。
+- MCP 发送能力需要额外配置 `MCP_ENABLED=true` 与 Gmail OAuth 凭据，详见下方 **MCP Gmail P0** 小节。
+
+### MCP Gmail P0
+
+P0 支持在 `AGENT_ENGINE=graph` 下让 Agent 把生成好的答案通过 Gmail MCP server 发给已录入的联系人：
+
+- `send_intent` 由 Coordinator 从用户话里抽出；命中"发给 / 转给 / 抄送 / 通知"等词就走 send 节点。
+- 发送前会做确定性 preflight：只允许 exact/alias 命中且有邮箱的联系人；模糊命中、群聊、飞书通道一律不发送，返回中文的"需要确认"提示。
+- 真正的 Gmail 调用受 `SendGuardInterceptor` 白名单保护，成功会写 `backend/log/sends.log`。
+- P0 不做附件、不做飞书、不做 per-user OAuth，全部用统一沙箱 Gmail 身份。
+
+需要设置的环境变量（都在 `backend/.env`）：
+
+- `MCP_ENABLED=true`
+- `GMAIL_CREDENTIALS_PATH=./secrets/gmail_credentials.json`
+- `GMAIL_TOKEN_PATH=./secrets/gmail_token.json`
+- `GMAIL_SENDER_EMAIL=your-sandbox@gmail.com`
+
+首次准备（Windows PowerShell）：
+
+```powershell
+cd backend
+# 1. seed 一个允许接收邮件的联系人
+uv run python -m scripts.seed_contacts --name 张三 --email your-test@example.com --alias zhangsan
+# 2. 真发一封 smoke 邮件，观察 log/sends.log 是否新增一行
+uv run python -m scripts.mcp_smoke_test --to your-test@example.com
+```
+
+对话样例："把刚才那份报告发给张三" → 图会在 finalize 后进入 send 节点，前端最后会看到 `发送结果：已通过 Gmail 发送给张三。`。
 
 ### 前端环境变量
 
