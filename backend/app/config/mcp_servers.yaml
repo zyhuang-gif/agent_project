@@ -1,0 +1,27 @@
+tool_name_prefix: true
+servers:
+  gmail:
+    enabled: true
+    transport: stdio
+    command: python
+    args: ["-m", "mcp_servers.gmail.server"]
+    include_tools: ["send_email"]
+    env:
+      GMAIL_CREDENTIALS_PATH: "${GMAIL_CREDENTIALS_PATH}"
+      GMAIL_TOKEN_PATH: "${GMAIL_TOKEN_PATH}"
+      GMAIL_SENDER_EMAIL: "${GMAIL_SENDER_EMAIL}"
+  contacts:
+    enabled: true
+    transport: stdio
+    command: python
+    args: ["-m", "mcp_servers.contacts.server"]
+    include_tools: ["resolve", "list_all"]
+  feishu:
+    enabled: false
+    transport: stdio
+    command: python
+    args: ["-m", "mcp_servers.feishu.server"]
+    env:
+      LARK_APP_ID: "${LARK_APP_ID}"
+      LARK_APP_SECRET: "${LARK_APP_SECRET}"
+      LARK_DOMAIN: "${LARK_DOMAIN}"

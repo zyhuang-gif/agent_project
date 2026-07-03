@@ -20,7 +20,7 @@ dependencies = [
     "PyYAML~=6.0.3",
     "pydantic~=2.12.5",
     "requests~=2.32.5",
-    "uvicorn==0.21.1",
+    "uvicorn>=0.23.1",
     "aiomysql>=0.3.2",
     "redis>=7.3.0",
     "langchain-ollama>=1.0.1",
@@ -49,6 +49,11 @@ dependencies = [
     "langgraph>=1.1.6",
     "aiosqlite>=0.22.1",
     "langchain-deepseek>=1.0.1",
+    "mcp==1.12.4",
+    "langchain-mcp-adapters>=0.1.0",
+    "google-api-python-client>=2.180.0",
+    "google-auth>=2.40.0",
+    "google-auth-oauthlib>=1.2.0",
 ]
 
 # 开发依赖
