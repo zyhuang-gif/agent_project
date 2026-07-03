@@ -68,3 +68,14 @@ async def test_graph_skips_retrieval_when_no_retrieval(monkeypatch):
     assert rag_called["hit"] is False                 # 检索未被触发
     assert result["plan"]["need_retrieval"] is False
     assert result["final_answer"] == "你好，我能帮你查询企业知识。"
+
+
+from app.agent.graph.build import route_after_finalize
+
+
+def test_route_after_finalize_goes_to_send_when_intent():
+    assert route_after_finalize({"plan": {"send_intent": True}}) == "send"
+
+
+def test_route_after_finalize_ends_without_send_intent():
+    assert route_after_finalize({"plan": {"send_intent": False}}) == "end"

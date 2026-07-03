@@ -15,9 +15,11 @@ class AgentState(TypedDict, total=False):
     query: str
     history: list                       # [(user, assistant), ...]
     identity: Optional[RequestIdentity]
+    session_id: str                     # send 节点写审计要用；不影响主问答
 
     # Coordinator 产出
-    plan: dict                          # {task_type: str, need_retrieval: bool, reason: str}
+    plan: dict                          # {task_type, need_retrieval, reason,
+                                        #  send_intent, recipients, channels}
 
     # Knowledge 产出
     documents: list                     # list[str]
@@ -30,6 +32,10 @@ class AgentState(TypedDict, total=False):
 
     # 输出
     final_answer: str
+
+    # Send 产出（P0 新增）
+    send_payload: object                # app.mcp.payload.SendPayload
+    send_report: str                    # 前端可见的发送结果文案
 
     # token 计量（各节点 append 本次 LLM 调用的 total，reducer 累加）
     token_usage: Annotated[int, operator.add]

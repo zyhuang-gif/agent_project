@@ -38,6 +38,7 @@ class GraphRunner:
             "query": query,
             "history": history or [],
             "identity": identity,
+            "session_id": session_id,
             "plan": {},
             "documents": [],
             "citations": [],
@@ -60,6 +61,7 @@ class GraphRunner:
         graph_token_usage = 0
         final_trace: list = []
         final_plan: dict = {}
+        final_send_report: str = ""
         async for item in self._graph.astream(
             state, stream_mode=["messages", "custom", "values"]
         ):
@@ -76,6 +78,8 @@ class GraphRunner:
                         final_trace = payload["trace"]
                     if payload.get("plan") is not None:
                         final_plan = payload["plan"]
+                    if payload.get("send_report"):
+                        final_send_report = payload["send_report"]
                 continue
 
             # 在 messages 模式下尽量从 chunk 读精确 usage（最后一帧通常带）
