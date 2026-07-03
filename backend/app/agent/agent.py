@@ -440,6 +440,7 @@ async def get_agent_stream_response(
     steps: list = []
     total_tokens = 0
     citations: list = []
+    send_report: Optional[str] = None
     # 累积每条 agent step 的最终态(以 step.id 为 key 合并 update),
     # 以便流结束后随 assistant 消息一起落库,前端切回会话能还原
     agent_steps_state: dict[str, dict] = {}
@@ -481,6 +482,7 @@ async def get_agent_stream_response(
             steps = event["steps"]
             total_tokens = event.get("tokens", 0)
             citations = event.get("citations", [])
+            send_report = event.get("send_report")
 
     response = "".join(full_response) or "抱歉，我无法理解您的请求。"
     save_t0 = time.perf_counter()
@@ -489,13 +491,14 @@ async def get_agent_stream_response(
         session_id, user_id, query, response,
         citations=citations,
         steps=final_agent_steps,
+        send_report=send_report,
     )
     logger.info(
         f"[Timing][AgentSSE] stage=history_save session={session_id} "
         f"duration={time.perf_counter() - save_t0:.3f}s"
     )
 
-    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'citations': citations, 'tokens': total_tokens}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'citations': citations, 'tokens': total_tokens, 'send_report': send_report}, ensure_ascii=False)}\n\n"
     logger.info(
         f"[Timing][AgentSSE] stage=request_total session={session_id} "
         f"response_chars={len(response)} duration={time.perf_counter() - total_t0:.3f}s"

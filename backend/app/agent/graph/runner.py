@@ -111,6 +111,14 @@ class GraphRunner:
             yield {"type": "token", "data": final_answer_state}
             content_buf = final_answer_state
 
+        # send 节点如果产出了 send_report，作为可见 token 附加到答案末尾，
+        # 让用户当场看到发送结果；同时 done frame 里带上一份用于持久化和前端 badge。
+        if final_send_report:
+            suffix = f"\n\n发送结果：{final_send_report}"
+            yield {"type": "token", "data": suffix}
+            full_answer.append(suffix)
+            content_buf += suffix
+
         yield {
             "type": "agent_step_update",
             "data": {"id": "answer_generated", "status": "done",
@@ -132,7 +140,8 @@ class GraphRunner:
             accurate_tokens if accurate_tokens is not None else estimated_total
         )
         yield {"type": "done", "steps": trace_steps, "tokens": final_tokens,
-               "citations": final_citations, "plan": final_plan}
+               "citations": final_citations, "plan": final_plan,
+               "send_report": final_send_report}
 
 
 # 全局单例（图编译一次复用）

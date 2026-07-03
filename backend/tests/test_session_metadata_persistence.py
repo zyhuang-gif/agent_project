@@ -37,7 +37,7 @@ async def test_add_message_persists_citations_and_steps(sm_db):
         {"id": "tool_rag_summary_tools", "title": "检索", "status": "done", "level": "success", "detail": "已检索 2 个文档"},
         {"id": "answer_generated", "title": "生成", "status": "done", "level": "success"},
     ]
-    await sm.add_message(sid, uid, "问题?", "回答。", citations=citations, steps=steps)
+    await sm.add_message(sid, uid, "问题?", "回答。", citations=citations, steps=steps, send_report="已发送")
 
     async with sm_db() as db:
         rows = (await db.run_sync(
@@ -45,7 +45,7 @@ async def test_add_message_persists_citations_and_steps(sm_db):
         ))
     assert [r.role for r in rows] == ["user", "assistant"]
     assert rows[0].metadata_ is None
-    assert rows[1].metadata_ == {"citations": citations, "steps": steps}
+    assert rows[1].metadata_ == {"citations": citations, "steps": steps, "send_report": "已发送"}
 
 
 @pytest.mark.asyncio
@@ -54,7 +54,7 @@ async def test_get_session_restores_messages_with_metadata(sm_db):
     sid, uid = "sess-meta-2", "user-2"
     citations = [{"filename": "a.txt", "score": 0.8, "chunk_preview": "x", "kb_id": None}]
     steps = [{"id": "tool_rag_summary_tools", "title": "检索", "status": "done", "level": "success"}]
-    await sm.add_message(sid, uid, "Q1", "A1", citations=citations, steps=steps)
+    await sm.add_message(sid, uid, "Q1", "A1", citations=citations, steps=steps, send_report="已发送")
     await sm.add_message(sid, uid, "Q2", "A2", citations=[], steps=[])
 
     data = await sm.get_session(sid, uid)
@@ -65,7 +65,9 @@ async def test_get_session_restores_messages_with_metadata(sm_db):
     assert "citations" not in msgs[0] and "steps" not in msgs[0]
     assert msgs[1]["citations"] == citations
     assert msgs[1]["steps"] == steps
+    assert msgs[1]["send_report"] == "已发送"
     assert msgs[3]["citations"] == [] and msgs[3]["steps"] == []
+    assert msgs[3]["send_report"] is None
 
 
 @pytest.mark.asyncio
@@ -84,7 +86,13 @@ async def test_get_session_handles_legacy_null_metadata(sm_db):
     assert data["history"] == [("老问题", "老回答")]
     msgs = data["messages"]
     assert msgs[0] == {"role": "user", "content": "老问题"}
-    assert msgs[1] == {"role": "assistant", "content": "老回答", "citations": [], "steps": []}
+    assert msgs[1] == {
+        "role": "assistant",
+        "content": "老回答",
+        "citations": [],
+        "steps": [],
+        "send_report": None,
+    }
 
 
 @pytest.mark.asyncio

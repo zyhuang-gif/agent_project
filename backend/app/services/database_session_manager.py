@@ -46,7 +46,7 @@ class DatabaseSessionManager:
                         i += 2
                     else:
                         i += 1
-                # 构建结构化消息列表(供前端切回会话时还原 citations / steps)
+                # 构建结构化消息列表(供前端切回会话时还原 citations / steps / send_report)
                 structured_messages = []
                 for m in messages:
                     item = {"role": m.role, "content": m.content}
@@ -54,6 +54,7 @@ class DatabaseSessionManager:
                         meta = m.metadata_ or {}
                         item["citations"] = list(meta.get("citations") or [])
                         item["steps"] = list(meta.get("steps") or [])
+                        item["send_report"] = meta.get("send_report")
                     structured_messages.append(item)
                 return {
                     "history": history,
@@ -123,11 +124,13 @@ class DatabaseSessionManager:
         assistant_message: str,
         citations: Optional[List[Dict]] = None,
         steps: Optional[List[Dict]] = None,
+        send_report: Optional[str] = None,
     ):
         """添加消息并保存到数据库。
 
-        :param citations: 检索引用列表(可选)。提供时与 steps 一起写入 assistant 消息的 metadata_。
+        :param citations: 检索引用列表(可选)。提供时与 steps/send_report 一起写入 assistant metadata_。
         :param steps: agent 执行步骤列表(可选,前端 SSE schema 格式 {id, level, status, title, detail})。
+        :param send_report: send 节点的可见发送结果(可选)。P0 Gmail 发送路径会填充。
         """
         async with AsyncSessionLocal() as db:
             # 检查会话id是否存在
@@ -180,12 +183,13 @@ class DatabaseSessionManager:
             )
             db.add(user_msg)
 
-            # 添加助手消息;若调用方提供了 citations 或 steps,则一并写入 metadata_
+            # 添加助手消息;若调用方提供了 citations / steps / send_report,则一并写入 metadata_
             assistant_metadata = None
-            if citations is not None or steps is not None:
+            if citations is not None or steps is not None or send_report is not None:
                 assistant_metadata = {
                     "citations": list(citations or []),
                     "steps": list(steps or []),
+                    "send_report": send_report,
                 }
             assistant_msg = ChatMessage(
                 session_id=session.id,

@@ -16,7 +16,7 @@ class _FakeSessionManager:
     async def get_history(self, session_id, user_id):
         return []
 
-    async def add_message(self, session_id, user_id, query, response, citations=None, steps=None):
+    async def add_message(self, session_id, user_id, query, response, citations=None, steps=None, send_report=None):
         self.last_call = {
             "session_id": session_id,
             "user_id": user_id,
@@ -24,6 +24,7 @@ class _FakeSessionManager:
             "response": response,
             "citations": citations,
             "steps": steps,
+            "send_report": send_report,
         }
         return None
 
@@ -193,6 +194,8 @@ async def test_agent_stream_response_persists_steps_and_citations(monkeypatch):
 
     assert fake_sm.last_call is not None
     assert fake_sm.last_call["citations"] == [{"filename": "doc.md", "score": 0.9}]
+    # 非 send 路径不应写入 send_report
+    assert fake_sm.last_call["send_report"] is None
 
     persisted_steps = fake_sm.last_call["steps"]
     assert isinstance(persisted_steps, list)

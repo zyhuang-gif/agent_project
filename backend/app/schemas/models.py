@@ -33,11 +33,12 @@ class Citation(BaseModel):
 
 
 class SessionMessage(BaseModel):
-    """会话历史的结构化单条消息;assistant 消息会附带 citations / steps 元数据。"""
+    """会话历史的结构化单条消息;assistant 消息会附带 citations / steps / send_report 元数据。"""
     role: str
     content: str
     citations: List[Citation] = []
     steps: List[Dict[str, Any]] = []
+    send_report: Optional[str] = None
 
 
 class SessionResponse(BaseModel):
