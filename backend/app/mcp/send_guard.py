@@ -4,7 +4,9 @@
 1. 只拦截 (server_name="gmail", tool="send_email")；其它 tool 直通 handler。
 2. 在 handler 之前对 to/cc/bcc 每个地址查白名单，任一不通过就返回结构化
    RECIPIENT_NOT_ALLOWED，不真的调 Gmail API。
-3. handler 成功后向 log/sends.log 追加一条 JSONL 审计记录。
+3. handler 返回后只在真的成功（无 isError、无 error 字段、且拿到 message_id）时
+   才写 log/sends.log；否则把 result 视为失败（必要时改写为 isError=True），
+   不写审计，防止认证/API 失败被误记为成功。
 """
 import json
 from datetime import datetime, timezone
@@ -38,19 +40,31 @@ def _all_recipients(args: dict) -> list[str]:
     return recipients
 
 
-def _message_id(result: CallToolResult) -> str | None:
-    structured = getattr(result, "structuredContent", None) or {}
-    if isinstance(structured, dict) and structured.get("message_id"):
-        return str(structured["message_id"])
+def _content_payloads(result: CallToolResult) -> list[dict]:
+    payloads: list[dict] = []
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        payloads.append(structured)
     for item in getattr(result, "content", []) or []:
         text = getattr(item, "text", "")
         try:
             data = json.loads(text)
         except Exception:
             continue
-        if isinstance(data, dict) and data.get("message_id"):
+        if isinstance(data, dict):
+            payloads.append(data)
+    return payloads
+
+
+def _extract_message_id(payloads: list[dict]) -> str | None:
+    for data in payloads:
+        if data.get("message_id"):
             return str(data["message_id"])
     return None
+
+
+def _has_error_marker(payloads: list[dict]) -> bool:
+    return any("error" in data for data in payloads)
 
 
 class SendGuardInterceptor:
@@ -72,18 +86,35 @@ class SendGuardInterceptor:
                 })
 
         result = await handler(request)
-        if not getattr(result, "isError", False):
-            ctx = current_mcp_context()
-            _audit_path().parent.mkdir(parents=True, exist_ok=True)
-            record = {
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "user_id": ctx.get("user_id"),
-                "session_id": ctx.get("session_id"),
-                "channel": "gmail",
-                "recipient": recipients,
-                "subject_or_preview": (request.args.get("subject") or "")[:120],
-                "message_id": _message_id(result),
-            }
-            with _audit_path().open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        # 只要 handler 显式报错、payload 里带 error、或者根本没拿到 message_id，
+        # 都视为失败：不写审计，同时把结果强制标为 isError=True 让上游看得见。
+        payloads = _content_payloads(result)
+        is_error = bool(getattr(result, "isError", False))
+        has_error = _has_error_marker(payloads)
+        message_id = _extract_message_id(payloads)
+
+        if is_error or has_error or not message_id:
+            if not is_error:
+                try:
+                    result.isError = True
+                except Exception:
+                    return _error_result(
+                        payloads[0] if payloads else {"error": "GMAIL_SEND_FAILED", "channel": "gmail"}
+                    )
+            return result
+
+        ctx = current_mcp_context()
+        _audit_path().parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "user_id": ctx.get("user_id"),
+            "session_id": ctx.get("session_id"),
+            "channel": "gmail",
+            "recipient": recipients,
+            "subject_or_preview": (request.args.get("subject") or "")[:120],
+            "message_id": message_id,
+        }
+        with _audit_path().open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         return result

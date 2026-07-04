@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,11 @@ import yaml
 
 _ENV_PATTERN = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "mcp_servers.yaml"
+# yaml 里写 `command: python` 时，实际启动 stdio MCP 子进程会走 PATH 上第一个 python，
+# 这在 Windows 下常常落到系统全局 Python，导致子进程看不到 backend/.venv 里的 mcp 包。
+# 这里把非绝对路径的 python/python3 都改写成当前后端进程的 sys.executable，
+# 让 MCP server 一定用同一个 venv 起。
+_INTERPRETER_ALIASES = {"python", "python3", "python.exe", "python3.exe"}
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,20 @@ def _expand_env_value(key: str, value: Any) -> str:
     return resolved
 
 
+def _resolve_command(command: str | None) -> str | None:
+    if command is None:
+        return None
+    text = str(command).strip()
+    if not text:
+        return text
+    # 已经是绝对路径 / 相对路径（带斜杠），或与 sys.executable 相同——原样保留
+    if os.path.sep in text or "/" in text:
+        return text
+    if text.lower() in _INTERPRETER_ALIASES:
+        return sys.executable
+    return text
+
+
 def load_mcp_config(path: Path | None = None) -> MCPConfig:
     enabled = _env_bool("MCP_ENABLED", "false")
     config_path = path or _DEFAULT_CONFIG_PATH
@@ -85,7 +105,7 @@ def load_mcp_config(path: Path | None = None) -> MCPConfig:
         server = MCPServerConfig(
             name=name,
             transport=str(data.get("transport", "stdio")),
-            command=data.get("command"),
+            command=_resolve_command(data.get("command")),
             args=list(data.get("args") or []),
             url=data.get("url"),
             env=env,
