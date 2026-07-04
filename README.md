@@ -274,6 +274,9 @@ MCP_ENABLED=false
 GMAIL_CREDENTIALS_PATH=./secrets/gmail_credentials.json
 GMAIL_TOKEN_PATH=./secrets/gmail_token.json
 GMAIL_SENDER_EMAIL=your-sandbox@gmail.com
+# 可选：只让 gmail MCP 子进程走代理，父后端不受影响。CN 大陆一般需要。
+GMAIL_HTTPS_PROXY=
+GMAIL_HTTP_PROXY=
 
 # JWT：必须和 DjangoUserService/.env 的 JWT_SECRET_KEY 一致
 SECRET_KEY=change_me
@@ -326,6 +329,9 @@ P0 支持在 `AGENT_ENGINE=graph` 下让 Agent 把生成好的答案通过 Gmail
 - `GMAIL_CREDENTIALS_PATH=./secrets/gmail_credentials.json`
 - `GMAIL_TOKEN_PATH=./secrets/gmail_token.json`
 - `GMAIL_SENDER_EMAIL=your-sandbox@gmail.com`
+- 可选：`GMAIL_HTTPS_PROXY=http://127.0.0.1:7897` / `GMAIL_HTTP_PROXY=http://127.0.0.1:7897`
+  —— 中国大陆访问 `googleapis.com` 通常要走代理。这两个 env 只注入 gmail MCP 子进程，
+  不会影响后端父进程（阿里云 LLM、Milvus、Django 用户服务等继续直连）。
 
 首次准备（Windows PowerShell）：
 

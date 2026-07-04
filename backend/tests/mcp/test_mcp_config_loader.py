@@ -139,3 +139,56 @@ servers:
 
     cfg = load_mcp_config(cfg_file)
     assert cfg.servers["gmail"].command == custom_path
+
+
+def test_optional_env_missing_is_dropped(tmp_path, monkeypatch):
+    """${VAR?} 语法：env 缺失时不当报错，只是从传给子进程的 env 里剔除。"""
+    monkeypatch.setenv("MCP_ENABLED", "true")
+    monkeypatch.setenv("GMAIL_SENDER_EMAIL", "sandbox@example.com")
+    monkeypatch.delenv("GMAIL_HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("GMAIL_HTTP_PROXY", raising=False)
+    cfg_file = tmp_path / "mcp_servers.yaml"
+    cfg_file.write_text(
+        """
+servers:
+  gmail:
+    enabled: true
+    transport: stdio
+    command: python
+    args: ["-m", "mcp_servers.gmail.server"]
+    env:
+      GMAIL_SENDER_EMAIL: "${GMAIL_SENDER_EMAIL}"
+      HTTPS_PROXY: "${GMAIL_HTTPS_PROXY?}"
+      HTTP_PROXY: "${GMAIL_HTTP_PROXY?}"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_mcp_config(cfg_file)
+    env = cfg.servers["gmail"].env
+    assert env["GMAIL_SENDER_EMAIL"] == "sandbox@example.com"
+    assert "HTTPS_PROXY" not in env
+    assert "HTTP_PROXY" not in env
+
+
+def test_optional_env_present_is_passed(tmp_path, monkeypatch):
+    """${VAR?} 语法：env 设了就正常展开传给子进程。"""
+    monkeypatch.setenv("MCP_ENABLED", "true")
+    monkeypatch.setenv("GMAIL_HTTPS_PROXY", "http://127.0.0.1:7897")
+    cfg_file = tmp_path / "mcp_servers.yaml"
+    cfg_file.write_text(
+        """
+servers:
+  gmail:
+    enabled: true
+    transport: stdio
+    command: python
+    args: ["-m", "mcp_servers.gmail.server"]
+    env:
+      HTTPS_PROXY: "${GMAIL_HTTPS_PROXY?}"
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_mcp_config(cfg_file)
+    assert cfg.servers["gmail"].env["HTTPS_PROXY"] == "http://127.0.0.1:7897"

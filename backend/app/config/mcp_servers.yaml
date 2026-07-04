@@ -10,10 +10,10 @@ servers:
       GMAIL_CREDENTIALS_PATH: "${GMAIL_CREDENTIALS_PATH}"
       GMAIL_TOKEN_PATH: "${GMAIL_TOKEN_PATH}"
       GMAIL_SENDER_EMAIL: "${GMAIL_SENDER_EMAIL}"
-      HTTPS_PROXY: "${HTTPS_PROXY}"
-      HTTP_PROXY: "${HTTP_PROXY}"
-      https_proxy: "${HTTPS_PROXY}"
-      http_proxy: "${HTTP_PROXY}"
+      # 只把代理注入 gmail 子进程，避免主后端父进程被误路由到代理。
+      # ${VAR?} 表示可选：未设时不传给子进程；国外部署直连时可不配。
+      HTTPS_PROXY: "${GMAIL_HTTPS_PROXY?}"
+      HTTP_PROXY: "${GMAIL_HTTP_PROXY?}"
   contacts:
     enabled: true
     transport: stdio

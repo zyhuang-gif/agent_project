@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 
 
-_ENV_PATTERN = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
+_ENV_PATTERN = re.compile(r"^\$\{([A-Z0-9_]+)(\?)?\}$")
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "mcp_servers.yaml"
 # yaml 里写 `command: python` 时，实际启动 stdio MCP 子进程会走 PATH 上第一个 python，
 # 这在 Windows 下常常落到系统全局 Python，导致子进程看不到 backend/.venv 里的 mcp 包。
@@ -54,16 +54,25 @@ def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() not in ("0", "false", "no", "off")
 
 
-def _expand_env_value(key: str, value: Any) -> str:
+def _expand_env_value(key: str, value: Any) -> str | None:
+    """展开 yaml 里的 ${VAR} / ${VAR?} 占位。
+
+    ${VAR}   —— 必填；env 缺失时抛错（fail-fast，避免半启动状态）。
+    ${VAR?}  —— 可选；env 缺失时返回 None，调用方会把它从传给子进程的 env 里剔除。
+    其它字符串原样返回。
+    """
     if value is None:
-        return ""
+        return None
     text = str(value)
     match = _ENV_PATTERN.match(text)
     if not match:
         return text
     env_name = match.group(1)
+    optional = match.group(2) == "?"
     resolved = os.getenv(env_name)
     if not resolved:
+        if optional:
+            return None
         raise ValueError(f"MCP enabled server requires env {env_name} for {key}")
     return resolved
 
@@ -98,10 +107,11 @@ def load_mcp_config(path: Path | None = None) -> MCPConfig:
         data = data or {}
         if not bool(data.get("enabled", False)):
             continue
-        env = {
-            env_key: _expand_env_value(env_key, env_val)
-            for env_key, env_val in (data.get("env") or {}).items()
-        }
+        env = {}
+        for env_key, env_val in (data.get("env") or {}).items():
+            resolved = _expand_env_value(env_key, env_val)
+            if resolved is not None:
+                env[env_key] = resolved
         server = MCPServerConfig(
             name=name,
             transport=str(data.get("transport", "stdio")),
