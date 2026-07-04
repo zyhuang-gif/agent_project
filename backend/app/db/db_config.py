@@ -30,6 +30,7 @@ AsyncSessionLocal = async_sessionmaker(
 # 初始化数据库，创建所有表
 async def init_db():
     from app.models import contact  # noqa: F401 —— 让 Base.metadata 注册 contact/FeishuGroup
+    from app.models import send_audit  # noqa: F401 —— P3a：注册 send_audit 表
 
     async with async_engine.begin() as conn:
         # 先删除旧表，然后创建新表
