@@ -121,3 +121,6 @@ backend/.pytmp*/
 backend/.pytest-tmp*/
 # MCP Gmail OAuth 凭据与 token，本地手工授权后生成，绝不能进仓库
 backend/secrets/
+
+# P1 附件运行时目录（生成的 .md artifact，运行时产物，不进仓库）
+backend/runtime/
