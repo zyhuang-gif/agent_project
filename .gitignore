@@ -119,3 +119,5 @@ CLAUDE.md
 backend/eval/reports/
 backend/.pytmp*/
 backend/.pytest-tmp*/
+# MCP Gmail OAuth 凭据与 token，本地手工授权后生成，绝不能进仓库
+backend/secrets/

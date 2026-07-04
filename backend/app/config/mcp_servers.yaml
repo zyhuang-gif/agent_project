@@ -10,6 +10,10 @@ servers:
       GMAIL_CREDENTIALS_PATH: "${GMAIL_CREDENTIALS_PATH}"
       GMAIL_TOKEN_PATH: "${GMAIL_TOKEN_PATH}"
       GMAIL_SENDER_EMAIL: "${GMAIL_SENDER_EMAIL}"
+      HTTPS_PROXY: "${HTTPS_PROXY}"
+      HTTP_PROXY: "${HTTP_PROXY}"
+      https_proxy: "${HTTPS_PROXY}"
+      http_proxy: "${HTTP_PROXY}"
   contacts:
     enabled: true
     transport: stdio
