@@ -6,9 +6,10 @@
      返回 send_report + trace，不调 Gmail 工具。
   3. build_send_payload 生成专用 subject/body，不直接把 final_answer 塞进 Gmail。
   4. 后端确定性地调用 gmail_send_email 一次；不再走 create_react_agent 让 LLM 决定，
-     确保 P0 “一次 send_node 最多一次真实 gmail_send_email 调用”。
+     确保 P0 "一次 send_node 最多一次真实 gmail_send_email 调用"。
 """
 import json
+from typing import Any
 
 from app.agent.graph._stream import safe_get_stream_writer
 from app.agent.graph.state import AgentState
@@ -18,36 +19,83 @@ from app.mcp.payload import build_send_payload
 from app.mcp.preflight import resolve_send_targets
 
 
-def _extract_tool_error(result) -> dict | None:
-    """从 tool.ainvoke 返回结构里抽出错误 payload；没有错则返回 None。"""
-    # LangChain BaseTool.ainvoke 通常返回 str/dict；有些实现会返回 tuple(content, artifact)。
-    payload = result
-    if isinstance(result, tuple) and len(result) >= 1:
-        payload = result[0]
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = {"raw": payload}
-    if isinstance(payload, dict):
-        if payload.get("error"):
-            return payload
-        if not payload.get("message_id"):
-            return {"error": "GMAIL_SEND_FAILED", "channel": "gmail", "raw": payload}
+def _extract_dict_payloads(result: Any) -> list[dict]:
+    """把 tool.ainvoke 的返回值 **展平** 成一组结构化 dict payload。
+
+    langchain-mcp-adapters 的 StructuredTool(response_format="content_and_artifact")
+    真实返回是 list[dict]，形如：
+        [{"type":"text","text":"{\"message_id\":\"...\"}"}]
+    错误也是同样结构：
+        [{"type":"text","text":"{\"error\":\"RECIPIENT_NOT_ALLOWED\",...}"}]
+    另外 StructuredTool 也可能返回 (content, artifact) tuple，或直接 dict / JSON string。
+    这里统一处理，让 error / message_id 的判定不受返回形态影响。
+    """
+    payloads: list[dict] = []
+
+    def _walk(node: Any) -> None:
+        if node is None:
+            return
+        # dict 直接算一份 payload
+        if isinstance(node, dict):
+            # MCP content block：{"type":"text","text":"...json..."}
+            if node.get("type") == "text" and isinstance(node.get("text"), str):
+                _walk(node["text"])
+                return
+            payloads.append(node)
+            return
+        # (content, artifact)：两个位置都要看
+        if isinstance(node, tuple):
+            for item in node:
+                _walk(item)
+            return
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+            return
+        # ToolMessage / 其它带 content 属性的对象
+        content_attr = getattr(node, "content", None)
+        if content_attr is not None and content_attr is not node:
+            _walk(content_attr)
+            return
+        if isinstance(node, str):
+            text = node.strip()
+            if not text:
+                return
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                # 不是 JSON，就不当结构化 payload 处理——不视为成功也不视为失败。
+                return
+            _walk(parsed)
+            return
+        # 其它类型（数字、bool 等）忽略
+
+    _walk(result)
+    return payloads
+
+
+def _extract_tool_error(result: Any) -> dict | None:
+    """从 tool.ainvoke 返回结构里抽出错误 payload；没有错则返回 None。
+
+    判定规则：
+      - 任一 payload 含 "error" → 该 payload 就是错误
+      - 找不到含 message_id 的 payload → 视为失败（避免静默假成功）
+      - 有 message_id 且无 error → 返回 None（真正成功）
+    """
+    payloads = _extract_dict_payloads(result)
+    for data in payloads:
+        if data.get("error"):
+            return data
+    if not any(data.get("message_id") for data in payloads):
+        return {"error": "GMAIL_SEND_FAILED", "channel": "gmail",
+                "raw": payloads or repr(result)[:200]}
     return None
 
 
-def _message_id(result) -> str | None:
-    payload = result
-    if isinstance(result, tuple) and len(result) >= 1:
-        payload = result[0]
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            return None
-    if isinstance(payload, dict):
-        return payload.get("message_id")
+def _message_id(result: Any) -> str | None:
+    for data in _extract_dict_payloads(result):
+        if data.get("message_id"):
+            return str(data["message_id"])
     return None
 
 
