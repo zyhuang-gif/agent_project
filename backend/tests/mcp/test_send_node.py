@@ -4,6 +4,13 @@ from app.mcp.payload import SendPayload
 from app.mcp.preflight import PreflightResult, ResolvedRecipient
 
 
+@pytest.fixture(autouse=True)
+def _isolate_artifact_root(monkeypatch, tmp_path):
+    """让 send_node 的 artifact 输出落在测试用 tmp_path 里，不污染仓库。"""
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path))
+    yield
+
+
 @pytest.mark.asyncio
 async def test_send_node_skips_without_intent():
     from app.agent.graph.nodes.send import send_node
@@ -75,11 +82,11 @@ async def test_send_node_invokes_gmail_tool_exactly_once(monkeypatch):
     })
 
     assert len(tool.calls) == 1
-    assert tool.calls[0] == {
-        "to": ["a@example.com"],
-        "subject": "S",
-        "body": "B",
-    }
+    called = tool.calls[0]
+    assert called["to"] == ["a@example.com"]
+    assert called["subject"] == "S"
+    assert called["body"] == "B"
+    assert called.get("attachments"), "P1 必须携带 attachments"
     assert "msg-1" in update["send_report"]
     assert "张三" in update["send_report"]
     assert update["send_payload"].subject == "S"
@@ -336,3 +343,83 @@ async def test_send_node_end_to_end_with_real_structured_tool(monkeypatch):
     assert update["trace"][0]["status"] == "done"
     assert "real-id" in update["send_report"]
     assert "message_id=None" not in update["send_report"]
+
+
+# ── P1 附件：send_node 生成 Markdown artifact 并透传 ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_node_generates_artifact_and_passes_attachments(monkeypatch):
+    """preflight 成功 → 生成 .md artifact → tool_args.attachments 非空 → send_report 含附件名。"""
+    import app.agent.graph.nodes.send as snd
+    from pathlib import Path
+
+    tool = _CountingTool({"message_id": "msg-attach"})
+    snd_mod = _patch_common(monkeypatch, tool)
+
+    update = await snd_mod.send_node({
+        "query": "把报告发给张三",
+        "final_answer": "# 报告\n\n内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": []},
+    })
+
+    assert len(tool.calls) == 1
+    args = tool.calls[0]
+    assert args["to"] == ["a@example.com"]
+    assert args["attachments"], "必须透传 attachments"
+    attach_path = args["attachments"][0]
+    assert Path(attach_path).exists()
+    assert Path(attach_path).read_text(encoding="utf-8") == "# 报告\n\n内容"
+    assert "msg-attach" in update["send_report"]
+    assert Path(attach_path).name in update["send_report"]
+    assert update["artifact_path"] == attach_path
+    assert update["artifact_name"] == Path(attach_path).name
+    assert update["artifact_mime"] == "text/markdown"
+
+
+@pytest.mark.asyncio
+async def test_send_node_short_circuits_when_artifact_fails(monkeypatch):
+    """artifact 生成失败 → 不调 gmail_send_email，返回失败 send_report。"""
+    import app.agent.graph.nodes.send as snd
+    from app.mcp.artifacts import ArtifactError
+
+    tool = _CountingTool({"message_id": "should-not-fire"})
+    snd_mod = _patch_common(monkeypatch, tool)
+
+    def _boom(**kwargs):
+        raise ArtifactError("simulated failure")
+
+    monkeypatch.setattr(snd_mod, "write_markdown_artifact", _boom)
+
+    update = await snd_mod.send_node({
+        "query": "q",
+        "final_answer": "a",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": []},
+    })
+
+    assert tool.calls == []
+    assert "发送失败" in update["send_report"]
+    assert update["trace"][0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_send_node_still_parses_list_content_blocks_with_attachments(monkeypatch):
+    """回归：附件模式下依旧要解析 langchain-mcp-adapters 的 list content blocks。"""
+    tool = _CountingTool(_content_blocks({"message_id": "list-attach"}))
+    snd = _patch_common(monkeypatch, tool)
+
+    update = await snd.send_node({
+        "query": "q",
+        "final_answer": "answer",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": []},
+    })
+    assert len(tool.calls) == 1
+    assert tool.calls[0].get("attachments"), "attachments 必须传给 tool"
+    assert update["trace"][0]["status"] == "done"
+    assert "list-attach" in update["send_report"]

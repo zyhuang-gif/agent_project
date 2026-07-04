@@ -13,6 +13,7 @@ from typing import Any
 
 from app.agent.graph._stream import safe_get_stream_writer
 from app.agent.graph.state import AgentState
+from app.mcp.artifacts import ArtifactError, write_markdown_artifact
 from app.mcp.client import mcp_manager
 from app.mcp.context import mcp_call_context
 from app.mcp.payload import build_send_payload
@@ -141,6 +142,31 @@ async def send_node(state: AgentState) -> dict:
         recipients=preflight.recipients,
     )
 
+    # P1：在真正调 Gmail 之前生成 Markdown artifact。任何校验/写盘异常都必须
+    # short-circuit——绝不能带着"半成品附件"去调 Gmail。
+    try:
+        artifact = write_markdown_artifact(
+            source_answer=state.get("final_answer") or "",
+            base_name=payload.subject or "artifact",
+        )
+    except ArtifactError as err:
+        report = f"发送失败：{err}"
+        writer({
+            "kind": "step",
+            "id": "send_done",
+            "status": "done",
+            "level": "warning",
+            "detail": report[:120],
+            "title": "发送失败",
+        })
+        return {
+            "send_payload": payload,
+            "send_report": report,
+            "trace": [
+                {"agent": "send", "status": "failed", "output": str(err)[:200]}
+            ],
+        }
+
     tools = mcp_manager.get_tools(names=["gmail_send_email"])
     if not tools:
         report = "发送能力当前不可用：Gmail MCP 工具未加载。"
@@ -155,6 +181,9 @@ async def send_node(state: AgentState) -> dict:
         return {
             "send_payload": payload,
             "send_report": report,
+            "artifact_path": artifact.path,
+            "artifact_name": artifact.name,
+            "artifact_mime": artifact.mime,
             "trace": [
                 {"agent": "send", "status": "skipped", "output": "gmail_tool_unavailable"}
             ],
@@ -165,6 +194,7 @@ async def send_node(state: AgentState) -> dict:
         "to": list(preflight.gmail_to),
         "subject": payload.subject,
         "body": payload.body_text,
+        "attachments": [artifact.path],
     }
 
     identity = state.get("identity")
@@ -185,6 +215,9 @@ async def send_node(state: AgentState) -> dict:
             return {
                 "send_payload": payload,
                 "send_report": report,
+                "artifact_path": artifact.path,
+                "artifact_name": artifact.name,
+                "artifact_mime": artifact.mime,
                 "trace": [
                     {"agent": "send", "status": "failed", "output": str(error)[:200]}
                 ],
@@ -205,6 +238,9 @@ async def send_node(state: AgentState) -> dict:
         return {
             "send_payload": payload,
             "send_report": report,
+            "artifact_path": artifact.path,
+            "artifact_name": artifact.name,
+            "artifact_mime": artifact.mime,
             "trace": [
                 {"agent": "send", "status": "failed",
                  "output": json.dumps(error_payload, ensure_ascii=False)[:200]}
@@ -213,7 +249,10 @@ async def send_node(state: AgentState) -> dict:
 
     message_id = _message_id(result)
     recipient_summary = "、".join(r.name for r in preflight.recipients) or "已配置联系人"
-    report = f"已通过 Gmail 发送给{recipient_summary}。message_id={message_id}"
+    report = (
+        f"已通过 Gmail 发送给{recipient_summary}，附件：{artifact.name}。"
+        f"message_id={message_id}"
+    )
     writer({
         "kind": "step",
         "id": "send_done",
@@ -225,5 +264,8 @@ async def send_node(state: AgentState) -> dict:
     return {
         "send_payload": payload,
         "send_report": report,
+        "artifact_path": artifact.path,
+        "artifact_name": artifact.name,
+        "artifact_mime": artifact.mime,
         "trace": [{"agent": "send", "status": "done", "output": report[:200]}],
     }
