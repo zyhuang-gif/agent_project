@@ -94,6 +94,39 @@ class ContactService:
             ).scalars().all()
             return any(normalize_email(row.email) == normalized for row in rows)
 
+    async def feishu_open_id_allowed(self, open_id: str) -> bool:
+        """P2 白名单：open_id 必须存在于 active contacts.feishu_open_id。
+        大小写与空白 sensitive——飞书 open_id 是大小写敏感的不透明字符串。"""
+        oid = (open_id or "").strip()
+        if not oid:
+            return False
+        async with AsyncSessionLocal() as db:
+            rows = (
+                await db.execute(
+                    select(Contact).where(
+                        Contact.is_active.is_(True),
+                        Contact.feishu_open_id == oid,
+                    )
+                )
+            ).scalars().all()
+            return bool(rows)
+
+    async def chat_id_allowed(self, chat_id: str) -> bool:
+        """P2 白名单：chat_id 必须存在于 active feishu_groups.chat_id。"""
+        cid = (chat_id or "").strip()
+        if not cid:
+            return False
+        async with AsyncSessionLocal() as db:
+            rows = (
+                await db.execute(
+                    select(FeishuGroup).where(
+                        FeishuGroup.is_active.is_(True),
+                        FeishuGroup.chat_id == cid,
+                    )
+                )
+            ).scalars().all()
+            return bool(rows)
+
     async def create_contact(self, **values) -> Contact:
         values["email"] = normalize_email(values.get("email"))
         async with AsyncSessionLocal() as db:
