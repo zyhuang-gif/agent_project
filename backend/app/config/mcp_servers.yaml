@@ -21,11 +21,21 @@ servers:
     args: ["-m", "mcp_servers.contacts.server"]
     include_tools: ["resolve", "list_all"]
   feishu:
+    # 默认关闭；配好 LARK_APP_ID / LARK_APP_SECRET 后再置 true。
     enabled: false
     transport: stdio
     command: python
     args: ["-m", "mcp_servers.feishu.server"]
+    # 只对 LangChain 暴露 P2 需要的这 4 个发送工具（tool_name_prefix=true 后
+    # 会加上 "feishu_" 前缀）。upload_file 不作为独立工具暴露——由 send_file_to_*
+    # 内部原子调用。
+    include_tools:
+      - send_message_to_user
+      - send_message_to_group
+      - send_file_to_user
+      - send_file_to_group
     env:
       LARK_APP_ID: "${LARK_APP_ID}"
       LARK_APP_SECRET: "${LARK_APP_SECRET}"
-      LARK_DOMAIN: "${LARK_DOMAIN}"
+      # LARK_DOMAIN 默认 https://open.feishu.cn；国际租户改 https://open.larksuite.com
+      LARK_DOMAIN: "${LARK_DOMAIN?}"
