@@ -667,6 +667,8 @@ async def test_send_node_gmail_success_feishu_fail_reports_failed(monkeypatch):
 
     assert len(gmail_tool.calls) == 1
     assert len(feishu_msg_tool.calls) == 1
+    # 首个失败即停：feishu text 失败后 file 工具绝不能再被调用
+    assert feishu_file_tool.calls == []
     assert update["trace"][0]["status"] == "failed"
     assert "gmail-ok" in update["send_report"]
     assert "发送失败" in update["send_report"]
@@ -747,3 +749,232 @@ async def test_send_node_feishu_success_list_content_blocks(monkeypatch):
     assert "om_fkey" in update["send_report"]
     assert "file_v3_z" in update["send_report"]
     assert "message_id=None" not in update["send_report"]
+
+
+# ── Fail-closed 预检（回归 P2 部分发送阻塞问题） ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_node_mixed_channel_feishu_missing_precheck_blocks_gmail(monkeypatch):
+    """混合通道：Gmail 工具存在但 Feishu 工具缺失时，预检必须阻止 Gmail 发送。
+
+    这是 P2 fail-closed 的最重要回归：如果预检不做，Gmail 会先真实发送，
+    然后整体才 failed → 违反 spec §6 "不部分发送"。
+    """
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["gmail", "feishu"],
+            recipients=[
+                ResolvedRecipient(name="张三", email="a@example.com", feishu_open_id="ou_zs")
+            ],
+            gmail_to=["a@example.com"],
+            feishu_users=[
+                ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")
+            ],
+        )
+
+    gmail_tool = _MultiTool("gmail_send_email", {"message_id": "should-not-fire"})
+    # Feishu 侧完全不存在：manager 只知道 gmail_send_email
+    manager = _NamedManager({"gmail_send_email": gmail_tool})
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {
+            "send_intent": True,
+            "recipients": ["张三"],
+            "channels": ["gmail", "feishu"],
+        },
+    })
+
+    # 核心断言：Gmail 也 **绝不能** 被调用
+    assert gmail_tool.calls == [], "预检发现 Feishu 缺失时 Gmail 不允许发送"
+    assert update["trace"][0]["status"] == "failed"
+    assert "未加载" in update["send_report"]
+    # 报告里应列出具体缺失的工具名，方便排查
+    assert "feishu_send_message_to_user" in update["send_report"]
+    assert "feishu_send_file_to_user" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_feishu_only_file_missing_precheck_blocks_text(monkeypatch):
+    """Feishu-only：text 工具存在但 file 工具缺失 → text 也不能发。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["feishu"],
+            recipients=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+            feishu_users=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+        )
+
+    text_tool = _MultiTool("feishu_send_message_to_user", {"message_id": "should-not-fire"})
+    # file 工具没配
+    manager = _NamedManager({"feishu_send_message_to_user": text_tool})
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": ["feishu"]},
+    })
+
+    assert text_tool.calls == [], "file 工具缺失时 text 也不允许发送"
+    assert update["trace"][0]["status"] == "failed"
+    assert "未加载" in update["send_report"]
+    assert "feishu_send_file_to_user" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_stops_after_first_feishu_text_failure(monkeypatch):
+    """运行期首个失败即停：feishu text 返回 error 后，file 工具不能再被调用。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["feishu"],
+            recipients=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+            feishu_users=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+        )
+
+    text_tool = _MultiTool(
+        "feishu_send_message_to_user",
+        {"error": "LARK_API_ERROR", "channel": "feishu", "message": "boom"},
+    )
+    file_tool = _MultiTool("feishu_send_file_to_user", {"message_id": "should-not-fire"})
+    manager = _NamedManager({
+        "feishu_send_message_to_user": text_tool,
+        "feishu_send_file_to_user": file_tool,
+    })
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": ["feishu"]},
+    })
+
+    assert len(text_tool.calls) == 1
+    assert file_tool.calls == [], "text 失败后不能再调 file"
+    assert update["trace"][0]["status"] == "failed"
+    assert "发送失败" in update["send_report"]
+    assert "boom" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_stops_when_gmail_fails_before_feishu(monkeypatch):
+    """混合通道下 Gmail 先执行失败 → 后续 Feishu items 一律不再调用。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["gmail", "feishu"],
+            recipients=[
+                ResolvedRecipient(name="张三", email="a@example.com", feishu_open_id="ou_zs")
+            ],
+            gmail_to=["a@example.com"],
+            feishu_users=[
+                ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")
+            ],
+        )
+
+    gmail_tool = _MultiTool(
+        "gmail_send_email",
+        {"error": "GMAIL_API_ERROR", "channel": "gmail", "message": "quota"},
+    )
+    text_tool = _MultiTool("feishu_send_message_to_user", {"message_id": "should-not-fire"})
+    file_tool = _MultiTool("feishu_send_file_to_user", {"message_id": "should-not-fire"})
+    manager = _NamedManager({
+        "gmail_send_email": gmail_tool,
+        "feishu_send_message_to_user": text_tool,
+        "feishu_send_file_to_user": file_tool,
+    })
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {
+            "send_intent": True,
+            "recipients": ["张三"],
+            "channels": ["gmail", "feishu"],
+        },
+    })
+
+    assert len(gmail_tool.calls) == 1
+    assert text_tool.calls == []
+    assert file_tool.calls == []
+    assert update["trace"][0]["status"] == "failed"
+    assert "发送失败" in update["send_report"]
+    assert "quota" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_precheck_missing_attachment_blocks_all_tools(monkeypatch, tmp_path):
+    """本地文件预检：附件路径不存在时，任何真实工具都不允许被调。
+
+    走一条 Gmail-only 通道，但用 monkeypatch 让 write_markdown_artifact 返回一个
+    指向不存在文件的 Artifact——模拟"artifact 被外部删除 / ARTIFACT_ROOT 配错"。
+    """
+    import app.agent.graph.nodes.send as snd
+    from app.mcp.artifacts import Artifact
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["gmail"],
+            recipients=[ResolvedRecipient(name="张三", email="a@example.com")],
+            gmail_to=["a@example.com"],
+        )
+
+    fake_path = str(tmp_path / "does-not-exist.md")
+
+    def _fake_artifact(**kwargs):
+        return Artifact(path=fake_path, name="does-not-exist.md", mime="text/markdown", size=0)
+
+    gmail_tool = _MultiTool("gmail_send_email", {"message_id": "should-not-fire"})
+    manager = _NamedManager({"gmail_send_email": gmail_tool})
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "write_markdown_artifact", _fake_artifact)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": ["gmail"]},
+    })
+
+    assert gmail_tool.calls == []
+    assert update["trace"][0]["status"] == "failed"
+    assert "不存在" in update["send_report"]

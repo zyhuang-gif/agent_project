@@ -8,13 +8,18 @@
   4. 生成 Markdown artifact（P1 附件），失败短路。
   5. 构造串行 send plan：Gmail 一次全部收件人（沿用 P1 附件）；Feishu 每 target
      两次调用——先文本、再文件（引用 artifact）。
-  6. 依次执行；每步独立 outcome。任一失败即整体 trace failed，send_report 逐条
-     列出成功/失败。绝不因中间失败而"假成功"。
+  6. 预检阶段（任何 tool.ainvoke 之前）：
+     - 每个 plan item 需要的 MCP 工具都已加载；
+     - 每个附件/文件路径本地存在。
+     任一预检失败 → 整体 fail-closed，绝不部分发送。
+  7. 依次执行；一旦任一 item 失败立刻停止后续 items（不扩大部分发送），
+     send_report 如实保留已成功项 + 首个失败项，trace 标 failed。
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 from app.agent.graph._stream import safe_get_stream_writer
@@ -201,6 +206,8 @@ def _build_send_plan(
 
 
 async def _run_send_item(item: _SendItem) -> _Outcome:
+    """执行单条 send item。假设预检已经确保 tool 已加载 + 本地文件存在；
+    这里再兜底一次，避免预检 → 执行之间竞态漏网。"""
     tools = mcp_manager.get_tools(names=[item.tool_name])
     if not tools:
         return _Outcome(
@@ -233,6 +240,53 @@ async def _run_send_item(item: _SendItem) -> _Outcome:
         message_id=_message_id(result),
         file_key=_file_key(result) if item.kind == "feishu_file" else None,
     )
+
+
+# ── 预检 helpers（保证不部分发送） ────────────────────────────────────────
+
+
+def _plan_local_file_paths(items: list[_SendItem]) -> list[str]:
+    """所有 plan item 需要读盘的本地文件——Gmail 附件、Feishu file_path。"""
+    paths: list[str] = []
+    for item in items:
+        if item.kind == "email":
+            for attach in item.args.get("attachments") or []:
+                if attach:
+                    paths.append(str(attach))
+        elif item.kind == "feishu_file":
+            path_value = item.args.get("file_path")
+            if path_value:
+                paths.append(str(path_value))
+    return paths
+
+
+def _missing_local_files(paths: list[str]) -> list[str]:
+    """返回列表里"不存在或不是普通文件"的路径。"""
+    missing: list[str] = []
+    for raw in paths:
+        try:
+            path = Path(raw)
+            if not (path.exists() and path.is_file()):
+                missing.append(raw)
+        except OSError:
+            # 有些 Windows 路径解析异常也算不可读
+            missing.append(raw)
+    return missing
+
+
+def _missing_tools(items: list[_SendItem]) -> list[str]:
+    """返回本次 plan 需要但 mcp_manager 未加载的工具名（保留首次出现顺序、去重）。
+
+    判定复用 _run_send_item 里的语义：get_tools([name]) 结果为空 = 该工具未加载。
+    保证预检口径与实际执行时的口径一致，避免"预检通过但执行失败"的漏网。
+    """
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item.tool_name not in seen:
+            seen.add(item.tool_name)
+            unique.append(item.tool_name)
+    return [name for name in unique if not mcp_manager.get_tools(names=[name])]
 
 
 # ── send_report / trace 组装 ──────────────────────────────────────────────
@@ -400,15 +454,72 @@ async def send_node(state: AgentState) -> dict:
             ],
         }
 
+    # ── 预检 1：所有 plan 需要的 MCP 工具都必须已加载 ──────────────────
+    # 之所以在任何 tool.ainvoke 之前做，是为了避免"Gmail 先真实发送 → Feishu
+    # 工具缺失 → 混合发送里的部分成功"这类违反 spec §6 "不部分发送" 的场景。
+    missing_tools = _missing_tools(plan_items)
+    if missing_tools:
+        report = "发送失败：必需的 MCP 工具未加载：" + "、".join(missing_tools)
+        writer({
+            "kind": "step",
+            "id": "send_done",
+            "status": "done",
+            "level": "warning",
+            "detail": report[:120],
+            "title": "发送失败",
+        })
+        return {
+            "send_payload": payload,
+            "send_report": report,
+            **_artifact_state_update(artifact),
+            "trace": [
+                {
+                    "agent": "send",
+                    "status": "failed",
+                    "output": "tool_unavailable:" + ",".join(missing_tools),
+                }
+            ],
+        }
+
+    # ── 预检 2：本地文件（附件 / Feishu file_path）都必须存在 ──────────
+    missing_files = _missing_local_files(_plan_local_file_paths(plan_items))
+    if missing_files:
+        report = "发送失败：附件/文件不存在：" + "、".join(missing_files)
+        writer({
+            "kind": "step",
+            "id": "send_done",
+            "status": "done",
+            "level": "warning",
+            "detail": report[:120],
+            "title": "发送失败",
+        })
+        return {
+            "send_payload": payload,
+            "send_report": report,
+            **_artifact_state_update(artifact),
+            "trace": [
+                {
+                    "agent": "send",
+                    "status": "failed",
+                    "output": "attachment_missing:" + ",".join(missing_files),
+                }
+            ],
+        }
+
     identity = state.get("identity")
     user_id = getattr(identity, "user_id", None)
 
     outcomes: list[_Outcome] = []
     async with mcp_call_context(user_id=user_id, session_id=state.get("session_id")):
         for item in plan_items:
-            outcomes.append(await _run_send_item(item))
+            outcome = await _run_send_item(item)
+            outcomes.append(outcome)
+            # 首个失败即停：避免用户误以为"看到 gmail 已发 + feishu 报错"就代表
+            # feishu 只失败了一步；也避免为已注定失败的通道再打一次远端 API。
+            if not outcome.ok:
+                break
 
-    all_ok = all(o.ok for o in outcomes)
+    all_ok = bool(outcomes) and all(o.ok for o in outcomes)
     report = _format_send_report(outcomes, artifact)
     trace_output = _format_trace_output(outcomes)
 
