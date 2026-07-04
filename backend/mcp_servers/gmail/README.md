@@ -1,6 +1,6 @@
 # Gmail MCP Server
 
-P0 exposes one tool only: `send_email`.
+P1 exposes one tool only: `send_email(to, subject, body, attachments?)`.
 
 Setup:
 
@@ -11,4 +11,16 @@ Setup:
 
 Scope: `https://www.googleapis.com/auth/gmail.send`.
 
-No Gmail read, delete, label, filter, or attachment capability is exposed in P0.
+## P1: Markdown attachments
+
+`send_email` accepts an optional `attachments: list[str]` of absolute paths.
+Every path is validated **before** any Gmail API call:
+
+- Must live under `ARTIFACT_ROOT` (defaults to `backend/runtime/artifacts`).
+- Only `.md` is allowed; a single file must be ≤ 5 MiB.
+- Missing / oversize / wrong-extension / outside-root all raise
+  `GmailSendError("ATTACHMENT_INVALID", ...)`, which `send_guard` still
+  reports as `isError=True` and therefore never audits as a success.
+
+No Gmail read, delete, label, filter, or non-Markdown attachment capability is
+exposed. PDF / Docx / 飞书 / per-user OAuth remain out of scope for P1.
