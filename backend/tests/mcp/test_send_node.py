@@ -423,3 +423,327 @@ async def test_send_node_still_parses_list_content_blocks_with_attachments(monke
     assert tool.calls[0].get("attachments"), "attachments 必须传给 tool"
     assert update["trace"][0]["status"] == "done"
     assert "list-attach" in update["send_report"]
+
+
+# ── P2：飞书 / 混合通道 ─────────────────────────────────────────────────
+
+
+class _MultiTool:
+    """按 tool name 分发返回值 / 抛错的 fake tool；同时记录 args。"""
+
+    def __init__(self, name, return_value=None, raise_error=None):
+        self.name = name
+        self.return_value = return_value
+        self.raise_error = raise_error
+        self.calls: list[dict] = []
+
+    async def ainvoke(self, args):
+        self.calls.append(args)
+        if self.raise_error is not None:
+            raise self.raise_error
+        return self.return_value
+
+
+class _NamedManager:
+    """按名字提供不同工具的 fake mcp_manager。缺失名字返回 []。"""
+
+    def __init__(self, tools_by_name):
+        self.tools_by_name = tools_by_name
+
+    def get_tools(self, names=None):
+        if names is None:
+            return list(self.tools_by_name.values())
+        return [self.tools_by_name[n] for n in names if n in self.tools_by_name]
+
+
+async def _mock_payload_body(**kwargs):
+    return SendPayload(
+        subject="S", body_text="正文", source_answer_preview="A", attachments=[]
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_node_feishu_user_success(monkeypatch):
+    """channels=['feishu'] + 一个 person：一次 text + 一次 file。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["feishu"],
+            recipients=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+            feishu_users=[
+                ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")
+            ],
+        )
+
+    text_tool = _MultiTool("feishu_send_message_to_user", {"message_id": "om_msg"})
+    file_tool = _MultiTool(
+        "feishu_send_file_to_user",
+        {"message_id": "om_file", "file_key": "file_v3_x"},
+    )
+    manager = _NamedManager({
+        "feishu_send_message_to_user": text_tool,
+        "feishu_send_file_to_user": file_tool,
+    })
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "把报告发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": ["feishu"]},
+    })
+
+    assert len(text_tool.calls) == 1
+    assert text_tool.calls[0]["open_id"] == "ou_zs"
+    assert text_tool.calls[0]["content"] == "正文"
+    assert text_tool.calls[0]["msg_type"] == "text"
+
+    assert len(file_tool.calls) == 1
+    assert file_tool.calls[0]["open_id"] == "ou_zs"
+    assert file_tool.calls[0]["file_path"]
+    assert file_tool.calls[0]["file_name"]
+
+    assert update["trace"][0]["status"] == "done"
+    assert "om_msg" in update["send_report"]
+    assert "om_file" in update["send_report"]
+    assert "file_v3_x" in update["send_report"]
+    assert "张三" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_feishu_group_success(monkeypatch):
+    """channels=['feishu'] + group：send_message_to_group + send_file_to_group。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["feishu"],
+            recipients=[ResolvedRecipient(name="运营组", kind="group", chat_id="oc_op", channel="feishu")],
+            feishu_groups=[
+                ResolvedRecipient(name="运营组", kind="group", chat_id="oc_op", channel="feishu")
+            ],
+        )
+
+    text_tool = _MultiTool("feishu_send_message_to_group", {"message_id": "om_g_msg"})
+    file_tool = _MultiTool(
+        "feishu_send_file_to_group",
+        {"message_id": "om_g_file", "file_key": "file_g_x"},
+    )
+    manager = _NamedManager({
+        "feishu_send_message_to_group": text_tool,
+        "feishu_send_file_to_group": file_tool,
+    })
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发到运营组",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["运营组"], "channels": ["feishu"]},
+    })
+
+    assert text_tool.calls[0]["chat_id"] == "oc_op"
+    assert file_tool.calls[0]["chat_id"] == "oc_op"
+    assert update["trace"][0]["status"] == "done"
+    assert "om_g_msg" in update["send_report"]
+    assert "file_g_x" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_gmail_and_feishu_serial_success(monkeypatch):
+    """混合通道：gmail + feishu 各自成功。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        recipient = ResolvedRecipient(
+            name="张三", email="a@example.com", feishu_open_id="ou_zs"
+        )
+        feishu_user = ResolvedRecipient(
+            name="张三", feishu_open_id="ou_zs", channel="feishu"
+        )
+        return PreflightResult(
+            True,
+            channels=["gmail", "feishu"],
+            recipients=[recipient],
+            gmail_to=["a@example.com"],
+            feishu_users=[feishu_user],
+        )
+
+    gmail_tool = _MultiTool("gmail_send_email", {"message_id": "gmail-1"})
+    feishu_msg_tool = _MultiTool("feishu_send_message_to_user", {"message_id": "om_msg"})
+    feishu_file_tool = _MultiTool(
+        "feishu_send_file_to_user",
+        {"message_id": "om_file", "file_key": "file_v3_x"},
+    )
+    manager = _NamedManager({
+        "gmail_send_email": gmail_tool,
+        "feishu_send_message_to_user": feishu_msg_tool,
+        "feishu_send_file_to_user": feishu_file_tool,
+    })
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {
+            "send_intent": True,
+            "recipients": ["张三"],
+            "channels": ["gmail", "feishu"],
+        },
+    })
+
+    assert len(gmail_tool.calls) == 1
+    assert len(feishu_msg_tool.calls) == 1
+    assert len(feishu_file_tool.calls) == 1
+    assert update["trace"][0]["status"] == "done"
+    for tag in ("gmail-1", "om_msg", "om_file", "file_v3_x", "张三"):
+        assert tag in update["send_report"], f"缺 {tag}"
+
+
+@pytest.mark.asyncio
+async def test_send_node_gmail_success_feishu_fail_reports_failed(monkeypatch):
+    """混合通道：Gmail 成功但 feishu 失败 → 整体 trace failed，报告分别列出。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["gmail", "feishu"],
+            recipients=[
+                ResolvedRecipient(name="张三", email="a@example.com", feishu_open_id="ou_zs")
+            ],
+            gmail_to=["a@example.com"],
+            feishu_users=[
+                ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")
+            ],
+        )
+
+    gmail_tool = _MultiTool("gmail_send_email", {"message_id": "gmail-ok"})
+    feishu_msg_tool = _MultiTool(
+        "feishu_send_message_to_user",
+        {"error": "LARK_API_ERROR", "channel": "feishu", "message": "token missing"},
+    )
+    feishu_file_tool = _MultiTool(
+        "feishu_send_file_to_user",
+        {"error": "LARK_API_ERROR", "channel": "feishu", "message": "token missing"},
+    )
+    manager = _NamedManager({
+        "gmail_send_email": gmail_tool,
+        "feishu_send_message_to_user": feishu_msg_tool,
+        "feishu_send_file_to_user": feishu_file_tool,
+    })
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {
+            "send_intent": True,
+            "recipients": ["张三"],
+            "channels": ["gmail", "feishu"],
+        },
+    })
+
+    assert len(gmail_tool.calls) == 1
+    assert len(feishu_msg_tool.calls) == 1
+    assert update["trace"][0]["status"] == "failed"
+    assert "gmail-ok" in update["send_report"]
+    assert "发送失败" in update["send_report"]
+    assert "token missing" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_feishu_missing_tool_reports_failed(monkeypatch):
+    """preflight 通过但 feishu MCP 工具未加载 → 明确失败，不假成功。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["feishu"],
+            recipients=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+            feishu_users=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+        )
+
+    manager = _NamedManager({})  # 完全没工具
+
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": ["feishu"]},
+    })
+
+    assert update["trace"][0]["status"] == "failed"
+    assert "发送失败" in update["send_report"]
+    assert "未加载" in update["send_report"]
+
+
+@pytest.mark.asyncio
+async def test_send_node_feishu_success_list_content_blocks(monkeypatch):
+    """feishu tool 返回 list content blocks 时也要解析出 message_id / file_key。"""
+    import app.agent.graph.nodes.send as snd
+
+    async def _preflight(**kwargs):
+        return PreflightResult(
+            True,
+            channels=["feishu"],
+            recipients=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+            feishu_users=[ResolvedRecipient(name="张三", feishu_open_id="ou_zs", channel="feishu")],
+        )
+
+    text_tool = _MultiTool(
+        "feishu_send_message_to_user",
+        _content_blocks({"message_id": "om_txt"}),
+    )
+    file_tool = _MultiTool(
+        "feishu_send_file_to_user",
+        _content_blocks({"message_id": "om_fkey", "file_key": "file_v3_z"}),
+    )
+    manager = _NamedManager({
+        "feishu_send_message_to_user": text_tool,
+        "feishu_send_file_to_user": file_tool,
+    })
+    monkeypatch.setattr(snd, "resolve_send_targets", _preflight)
+    monkeypatch.setattr(snd, "build_send_payload", _mock_payload_body)
+    monkeypatch.setattr(snd, "mcp_manager", manager)
+
+    update = await snd.send_node({
+        "query": "发给张三",
+        "final_answer": "# 内容",
+        "session_id": "sid",
+        "identity": None,
+        "plan": {"send_intent": True, "recipients": ["张三"], "channels": ["feishu"]},
+    })
+
+    assert update["trace"][0]["status"] == "done"
+    assert "om_txt" in update["send_report"]
+    assert "om_fkey" in update["send_report"]
+    assert "file_v3_z" in update["send_report"]
+    assert "message_id=None" not in update["send_report"]
