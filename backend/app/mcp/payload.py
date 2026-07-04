@@ -3,7 +3,8 @@
 设计目的（spec §2.4、§6）：
 - 不能裸发 final_answer。P0 无附件，但 subject/body 需要固定的框架文案。
 - source_answer_preview 保留原答案摘要，供审计和调试。
-- attachments=[] 是 P1 的接口预留。
+- attachments 在 P1 由 send_node 在 preflight 通过后生成 Markdown artifact，
+  并把绝对路径写进 tool_args，SendPayload 本身仍是 frozen dataclass，不修改。
 """
 from dataclasses import dataclass, field
 

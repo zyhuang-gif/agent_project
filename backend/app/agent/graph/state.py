@@ -37,6 +37,11 @@ class AgentState(TypedDict, total=False):
     send_payload: object                # app.mcp.payload.SendPayload
     send_report: str                    # 前端可见的发送结果文案
 
+    # Send Artifact（P1 新增，Markdown 附件；未生成时字段缺失）
+    artifact_path: str
+    artifact_mime: str
+    artifact_name: str
+
     # token 计量（各节点 append 本次 LLM 调用的 total，reducer 累加）
     token_usage: Annotated[int, operator.add]
 
