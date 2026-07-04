@@ -333,6 +333,73 @@ async def test_send_guard_feishu_missing_message_id_no_audit(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_send_guard_feishu_user_file_without_file_key_is_error_no_audit(
+    monkeypatch, tmp_path
+):
+    """飞书 file 工具即便拿到 message_id，缺 file_key 也必须视为失败：
+    文件没上传成功，不能被误记为成功审计。"""
+    import app.mcp.send_guard as sg
+    monkeypatch.setattr(sg, "contact_service", _AllowService())
+    monkeypatch.setattr(svc_mod, "_audit_path", lambda: tmp_path / "sends.log")
+
+    async def handler(request):
+        return CallToolResult(
+            content=[TextContent(type="text", text='{"message_id":"om_x"}')],
+        )
+
+    result = await SendGuardInterceptor()(_FeishuUserFileReq(), handler)
+
+    assert result.isError is True
+    payload = json.loads(result.content[0].text)
+    assert payload["error"] == "FILE_KEY_MISSING"
+    assert payload["channel"] == "feishu"
+    assert not (tmp_path / "sends.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_send_guard_feishu_group_file_without_file_key_is_error_no_audit(
+    monkeypatch, tmp_path
+):
+    """同样规则也覆盖 send_file_to_group。"""
+    import app.mcp.send_guard as sg
+    monkeypatch.setattr(sg, "contact_service", _AllowService())
+    monkeypatch.setattr(svc_mod, "_audit_path", lambda: tmp_path / "sends.log")
+
+    async def handler(request):
+        return CallToolResult(
+            content=[TextContent(type="text", text='{"message_id":"om_g_x"}')],
+        )
+
+    result = await SendGuardInterceptor()(_FeishuGroupFileReq(), handler)
+
+    assert result.isError is True
+    payload = json.loads(result.content[0].text)
+    assert payload["error"] == "FILE_KEY_MISSING"
+    assert payload["channel"] == "feishu"
+    assert not (tmp_path / "sends.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_send_guard_feishu_file_without_file_key_no_db_audit(
+    monkeypatch, guard_audit_db
+):
+    """DB 断言的补充：Feishu file 缺 file_key 时 send_audit 表也必须为空。"""
+    Session, _ = guard_audit_db
+    import app.mcp.send_guard as sg
+    monkeypatch.setattr(sg, "contact_service", _AllowService())
+
+    async def handler(request):
+        return CallToolResult(
+            content=[TextContent(type="text", text='{"message_id":"om_x"}')],
+        )
+
+    result = await SendGuardInterceptor()(_FeishuUserFileReq(), handler)
+
+    assert result.isError is True
+    assert await _query_audits(Session) == []
+
+
+@pytest.mark.asyncio
 async def test_send_guard_passthrough_unknown_server(monkeypatch, tmp_path):
     """非 gmail/feishu 的 server 直通 handler，不校验白名单。"""
     import app.mcp.send_guard as sg

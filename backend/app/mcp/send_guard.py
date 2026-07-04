@@ -199,9 +199,18 @@ class SendGuardInterceptor:
                 return _mark_error_or_fallback(result, payloads)
             return result
 
+        file_key = _extract_file_key(payloads) if tool_name in FEISHU_FILE_TOOLS else None
+        # 文件工具即便拿到 message_id，缺 file_key 说明文件上传未真正完成 ——
+        # 强制判失败：既不能被 send_node 当作 done，也绝不能写审计。
+        if tool_name in FEISHU_FILE_TOOLS and not file_key:
+            return _error_result({
+                "error": "FILE_KEY_MISSING",
+                "channel": "feishu",
+                "tool": tool_name,
+            })
+
         ctx = current_mcp_context()
         preview = _feishu_preview(args, tool_name)
-        file_key = _extract_file_key(payloads) if tool_name in FEISHU_FILE_TOOLS else None
         await send_audit_service.record_send_success(
             channel="feishu",
             recipient_kind=recipient_kind,

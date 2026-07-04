@@ -20,12 +20,15 @@ from app.models.send_audit import SendAudit
 
 
 def _audit_path() -> Path:
-    """log/sends.log 相对 backend/ 的绝对路径。
+    """log/sends.log 相对**仓库根**的绝对路径（P0-P2 一直是仓库根/log/sends.log）。
 
-    __file__ = backend/app/services/send_audit_service.py
-    parents[2] = backend/
+    __file__      = <repo>/backend/app/services/send_audit_service.py
+    parents[0]    = services/
+    parents[1]    = app/
+    parents[2]    = backend/
+    parents[3]    = <repo>          ← 就是这一层
     """
-    return Path(__file__).resolve().parents[2] / "log" / "sends.log"
+    return Path(__file__).resolve().parents[3] / "log" / "sends.log"
 
 
 def _now_iso() -> str:

@@ -1,5 +1,6 @@
 """SendAuditService (P3a)：DB 主路径 + JSONL 兼容双写 + DB 失败兜底。"""
 import json
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -184,3 +185,38 @@ async def test_record_send_success_does_not_raise_when_jsonl_fails(monkeypatch, 
 
     # DB warning + JSONL warning 至少各一条
     assert len(warnings) >= 2
+
+
+# ── JSONL 路径回锁：必须在仓库根/log/sends.log 下 ─────────────────
+
+
+def test_audit_path_points_to_repo_root_log():
+    """P0-P2 的 sends.log 在 <repo>/log/ 下。改造后必须保持不变，不能搬到
+    backend/log/ 或其它任何位置——否则运维旧脚本读不到、审计线索错位。"""
+    import app.services.send_audit_service as mod
+
+    p = mod._audit_path()
+    assert p.name == "sends.log", f"文件名必须是 sends.log，实际={p.name}"
+    assert p.parent.name == "log", f"父目录必须叫 log，实际={p.parent.name}"
+
+    # 反锁：绝不允许再次搬到 backend/log
+    assert p.parent.parent.name != "backend", (
+        f"sends.log 不能落在 backend/log 下，应在仓库根/log；实际路径={p}"
+    )
+
+    # 正锁：与 P0-P2 保持一致 —— <repo>/log/sends.log
+    # send_audit_service.py 位于 backend/app/services/，parents[3] = <repo>
+    repo_root = Path(mod.__file__).resolve().parents[3]
+    assert p == repo_root / "log" / "sends.log", (
+        f"预期 {repo_root / 'log' / 'sends.log'}，实际 {p}"
+    )
+
+
+def test_audit_path_matches_send_guard_history():
+    """更严格：与 P0-P2 时 send_guard.py 里的路径口径完全一致。"""
+    import app.mcp.send_guard as sg_mod
+    import app.services.send_audit_service as svc_mod
+
+    # send_guard.py 位于 backend/app/mcp/，parents[3] = <repo>
+    legacy_repo_root = Path(sg_mod.__file__).resolve().parents[3]
+    assert svc_mod._audit_path() == legacy_repo_root / "log" / "sends.log"
